@@ -1,10 +1,15 @@
 import express from 'express';
 import cors from 'cors';
 import pool from './db.js';
+import crypto from 'crypto';
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+const BORDERPAY_API_KEY = process.env.BORDERPAY_API_KEY || 'Bp_test_bsF3Wj5HQNGzZm0fHbS5Vcm_05GfupXV';
+const BORDERPAY_BASE_URL = 'https://borderpay.id/api/v1';
+const BORDERPAY_WEBHOOK_TOKEN = process.env.BORDERPAY_WEBHOOK_TOKEN || '';
 
 const TIER_LIMITS = {
   free: 1,
@@ -13,11 +18,16 @@ const TIER_LIMITS = {
   platinum: 10,
 };
 
+const TIER_PRICES = {
+  bronze: 15000,
+  gold: 25000,
+  platinum: 45000,
+};
+
 // Helper to check & reset daily count if date changed
 async function getOrSyncUser(userId, email, name, avatar) {
   const today = new Date().toISOString().split('T')[0];
   
-  // Find or create user
   const checkUser = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
   
   if (checkUser.rows.length === 0) {
@@ -44,7 +54,109 @@ async function getOrSyncUser(userId, email, name, avatar) {
   return user;
 }
 
-// 1. AUTH / GOOGLE SYNC
+// ====== PAYMENT API ROUTES ======
+
+// Create payment session for subscription upgrade
+app.post('/api/payment/create', async (req, res) => {
+  try {
+    const { userId, plan } = req.body;
+    if (!userId || !plan) {
+      return res.status(400).json({ error: 'userId and plan are required' });
+    }
+
+    const price = TIER_PRICES[plan];
+    if (!price) {
+      return res.status(400).json({ error: 'Invalid plan' });
+    }
+
+    const referenceId = `AU-${plan.toUpperCase()}-${Date.now()}-${userId.slice(0, 6)}`;
+
+    // Create payment session with BorderPay
+    const borderpayRes = await fetch(`${BORDERPAY_BASE_URL}/payments`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${BORDERPAY_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        amount: price,
+        reference_id: referenceId,
+        method: 'qris'
+      })
+    });
+
+    const borderpayData = await borderpayRes.json();
+    if (!borderpayRes.ok) {
+      console.error('BorderPay error:', borderpayData);
+      return res.status(500).json({ error: 'Failed to create payment' });
+    }
+
+    // Save to database
+    await pool.query(
+      `INSERT INTO transactions (id, reference_id, user_id, plan, amount, status, pay_url, qr_string)
+       VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7)`,
+      [borderpayData.id, referenceId, userId, plan, price, borderpayData.pay_url, borderpayData.qr_string]
+    );
+
+    return res.json({
+      success: true,
+      referenceId,
+      payUrl: borderpayData.pay_url,
+      qrString: borderpayData.qr_string,
+      amount: price
+    });
+  } catch (err) {
+    console.error('Payment creation error:', err);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// Check payment status
+app.get('/api/payment/status/:referenceId', async (req, res) => {
+  try {
+    const { referenceId } = req.params;
+
+    // Check our database first
+    const dbRes = await pool.query('SELECT * FROM transactions WHERE reference_id = $1', [referenceId]);
+    if (dbRes.rows.length > 0) {
+      const tx = dbRes.rows[0];
+      // Sync with BorderPay if still pending
+      if (tx.status === 'pending') {
+        const borderpayRes = await fetch(`${BORDERPAY_BASE_URL}/payments/${referenceId}`, {
+          headers: { 'Authorization': `Bearer ${BORDERPAY_API_KEY}` }
+        });
+        const borderpayData = await borderpayRes.json();
+        
+        if (borderpayData.status === 'paid' || borderpayData.status === 'expired') {
+          await pool.query(
+            `UPDATE transactions SET status = $1 WHERE reference_id = $2`,
+            [borderpayData.status, referenceId]
+          );
+          return res.json({ ...tx, status: borderpayData.status });
+        }
+      }
+      return res.json(tx);
+    }
+
+    // Fallback to BorderPay
+    const borderpayRes = await fetch(`${BORDERPAY_BASE_URL}/payments/${referenceId}`, {
+      headers: { 'Authorization': `Bearer ${BORDERPAY_API_KEY}` }
+    });
+    const borderpayData = await borderpayRes.json();
+    
+    if (!borderpayRes.ok) {
+      return res.status(404).json({ error: 'Payment not found' });
+    }
+
+    return res.json(borderpayData);
+  } catch (err) {
+    console.error('Payment status error:', err);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// ====== USER ROUTES ======
+
 app.post('/api/auth/google', async (req, res) => {
   try {
     const { id, email, name, avatar } = req.body;
@@ -56,6 +168,14 @@ app.post('/api/auth/google', async (req, res) => {
     const limit = TIER_LIMITS[user.plan] || 1;
     const remaining = Math.max(0, limit - user.daily_exports_count);
 
+    // Check for active subscriptions that need upgrade
+    const activeTx = await pool.query(
+      `SELECT * FROM transactions 
+       WHERE user_id = $1 AND status = 'pending' AND created_at > NOW() - INTERVAL '30 minutes'
+       ORDER BY created_at DESC LIMIT 1`,
+      [id]
+    );
+
     return res.json({
       user: {
         id: user.id,
@@ -66,7 +186,12 @@ app.post('/api/auth/google', async (req, res) => {
         dailyExportsCount: user.daily_exports_count,
         dailyLimit: limit,
         remainingExports: remaining,
-      }
+      },
+      pendingPayment: activeTx.rows.length > 0 ? {
+        referenceId: activeTx.rows[0].reference_id,
+        payUrl: activeTx.rows[0].pay_url,
+        amount: activeTx.rows[0].amount
+      } : null
     });
   } catch (err) {
     console.error('Auth Error:', err);
@@ -74,7 +199,6 @@ app.post('/api/auth/google', async (req, res) => {
   }
 });
 
-// 2. GET USER PROFILE & QUOTA
 app.get('/api/user/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -98,6 +222,14 @@ app.get('/api/user/:id', async (req, res) => {
     const limit = TIER_LIMITS[user.plan] || 1;
     const remaining = Math.max(0, limit - user.daily_exports_count);
 
+    // Check for pending payment
+    const activeTx = await pool.query(
+      `SELECT * FROM transactions 
+       WHERE user_id = $1 AND status = 'pending' AND created_at > NOW() - INTERVAL '30 minutes'
+       ORDER BY created_at DESC LIMIT 1`,
+      [id]
+    );
+
     return res.json({
       id: user.id,
       email: user.email,
@@ -107,6 +239,11 @@ app.get('/api/user/:id', async (req, res) => {
       dailyExportsCount: user.daily_exports_count,
       dailyLimit: limit,
       remainingExports: remaining,
+      pendingPayment: activeTx.rows.length > 0 ? {
+        referenceId: activeTx.rows[0].reference_id,
+        payUrl: activeTx.rows[0].pay_url,
+        amount: activeTx.rows[0].amount
+      } : null
     });
   } catch (err) {
     console.error('User Fetch Error:', err);
@@ -114,11 +251,10 @@ app.get('/api/user/:id', async (req, res) => {
   }
 });
 
-// 3. UPGRADE SUBSCRIPTION TIER
 app.post('/api/user/upgrade', async (req, res) => {
   try {
     const { userId, plan } = req.body;
-    if (!['free', 'bronze', 'gold', 'platinum'].includes(plan)) {
+    if (!['bronze', 'gold', 'platinum'].includes(plan)) {
       return res.status(400).json({ error: 'Invalid plan' });
     }
 
@@ -150,7 +286,6 @@ app.post('/api/user/upgrade', async (req, res) => {
   }
 });
 
-// 4. CHECK & RECORD EXPORT QUOTA
 app.post('/api/export/record', async (req, res) => {
   try {
     const { userId, projectId, type } = req.body;
@@ -183,7 +318,6 @@ app.post('/api/export/record', async (req, res) => {
       });
     }
 
-    // Increment count & record log
     const nextCount = currentCount + 1;
     await pool.query(
       `UPDATE users SET daily_exports_count = $1, last_export_date = $2, updated_at = NOW() WHERE id = $3`,
@@ -207,7 +341,8 @@ app.post('/api/export/record', async (req, res) => {
   }
 });
 
-// 5. PROJECTS CRUD
+// ====== PROJECTS ROUTES ======
+
 app.get('/api/projects', async (req, res) => {
   try {
     const userId = req.query.userId;
@@ -233,7 +368,6 @@ app.post('/api/projects', async (req, res) => {
 
     const projectId = id || `proj_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
 
-    // Upsert project
     const upsertRes = await pool.query(
       `INSERT INTO projects (id, user_id, title, type, data, updated_at)
        VALUES ($1, $2, $3, $4, $5, NOW())
@@ -262,12 +396,12 @@ app.delete('/api/projects/:id', async (req, res) => {
   }
 });
 
-// 6. AI SCRIPT GENERATOR FOR AU STORIES
+// ====== AI SCRIPT GENERATOR ======
+
 app.post('/api/ai/generate', (req, res) => {
   try {
     const { prompt, theme = 'romance', characterA = 'Me', characterB = 'Partner' } = req.body;
     
-    // Curated Indonesian AU Story Templates Generator based on theme/prompt
     const templates = {
       romance: [
         `[B]: Kamu masih di perpus ya?
@@ -318,6 +452,71 @@ app.post('/api/ai/generate', (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'AI generation error' });
   }
+});
+
+// ====== BORDERPAY WEBHOOK ======
+
+app.post('/api/webhook/borderpay', async (req, res) => {
+  try {
+    const event = req.headers['x-borderpay-event'];
+    const token = req.headers['x-borderpay-token'];
+    
+    // Verify webhook token
+    if (BORDERPAY_WEBHOOK_TOKEN && token !== BORDERPAY_WEBHOOK_TOKEN) {
+      console.log('Webhook token mismatch');
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { data } = req.body;
+    if (!data) {
+      return res.status(400).json({ error: 'Invalid payload' });
+    }
+
+    const { reference_id, status, amount } = data;
+    
+    if (!reference_id || !status) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    console.log(`Webhook received: ${event} for ${reference_id}, status: ${status}`);
+
+    if (status === 'paid') {
+      // Update transaction status
+      await pool.query(
+        `UPDATE transactions SET status = 'paid', updated_at = NOW() 
+         WHERE reference_id = $1`,
+        [reference_id]
+      );
+
+      // Extract user ID and plan from reference_id (format: AU-{PLAN}-{TIMESTAMP}-{USERID})
+      const parts = reference_id.split('-');
+      if (parts.length >= 4 && parts[0] === 'AU') {
+        const plan = parts[1].toLowerCase();
+        const userId = parts[3];
+        
+        if (TIER_LIMITS[plan]) {
+          // Update user plan
+          await pool.query(
+            `UPDATE users SET plan = $1, updated_at = NOW() WHERE id = $2`,
+            [plan, userId]
+          );
+          
+          console.log(`User ${userId} upgraded to ${plan} plan`);
+        }
+      }
+    }
+
+    res.status(200).json({ received: true });
+  } catch (err) {
+    console.error('Webhook processing error:', err);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// Error handling
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ error: 'Internal Server Error' });
 });
 
 export default app;
