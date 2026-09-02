@@ -1,9 +1,11 @@
 import React, { useState, useRef } from 'react';
 import * as htmlToImage from 'html-to-image';
+import { useAuth } from '../context/AuthContext';
+import ProjectManagerModal from './ProjectManagerModal';
 import { 
   Download, Copy, Image as ImageIcon, Heart, Repeat2, MessageCircle, 
   Bookmark, Share, MoreHorizontal, CheckCircle2, ShieldCheck, 
-  Sun, Moon, Plus, Trash2, Sparkles, BarChart2
+  Sun, Moon, Plus, Trash2, Sparkles, BarChart2, Folder, Save, AlertCircle
 } from 'lucide-react';
 
 const DEFAULT_AVATARS = [
@@ -15,13 +17,14 @@ const DEFAULT_AVATARS = [
 ];
 
 export default function TwitterGenerator() {
-  const [theme, setTheme] = useState('black'); // 'black' | 'dim' | 'light'
+  const { user, recordExport, setUpgradeModalOpen } = useAuth();
+  const [theme, setTheme] = useState('black');
   
   // Author State
   const [name, setName] = useState('Arka Narendra');
   const [handle, setHandle] = useState('arkanrd_');
   const [avatarUrl, setAvatarUrl] = useState(DEFAULT_AVATARS[1]);
-  const [badge, setBadge] = useState('blue'); // 'none' | 'blue' | 'gold' | 'gray'
+  const [badge, setBadge] = useState('blue');
 
   // Main Tweet State
   const [tweetText, setTweetText] = useState('kalau emang ga pernah ada niatan buat stay, kenapa dari awal harus bikin nyaman? cape banget tau ga.');
@@ -54,10 +57,12 @@ export default function TwitterGenerator() {
     }
   ]);
 
-  const [activeTab, setActiveTab] = useState('main'); // 'main' | 'replies' | 'metrics'
+  const [activeTab, setActiveTab] = useState('main');
   const [isExporting, setIsExporting] = useState(false);
   const [copySuccess, setCopySuccess] = useState(false);
   const [showWatermark, setShowWatermark] = useState(true);
+  const [projectModalOpen, setProjectModalOpen] = useState(false);
+  const [quotaWarning, setQuotaWarning] = useState('');
   const tweetPreviewRef = useRef(null);
 
   const handleAddReply = () => {
@@ -86,6 +91,15 @@ export default function TwitterGenerator() {
 
   const handleDownloadImage = async () => {
     if (!tweetPreviewRef.current) return;
+    setQuotaWarning('');
+
+    const check = await recordExport(`Tweet @${handle}`, 'twitter');
+    if (!check.success) {
+      setQuotaWarning(check.error);
+      setUpgradeModalOpen(true);
+      return;
+    }
+
     setIsExporting(true);
     try {
       const dataUrl = await htmlToImage.toPng(tweetPreviewRef.current, {
@@ -124,7 +138,33 @@ export default function TwitterGenerator() {
     }
   };
 
-  // Color mappings
+  const handleLoadProjectData = (type, data) => {
+    if (data.name) setName(data.name);
+    if (data.handle) setHandle(data.handle);
+    if (data.avatarUrl) setAvatarUrl(data.avatarUrl);
+    if (data.tweetText) setTweetText(data.tweetText);
+    if (data.repliesList) setRepliesList(data.repliesList);
+    if (data.theme) setTheme(data.theme);
+  };
+
+  const currentProjectData = {
+    name,
+    handle,
+    avatarUrl,
+    badge,
+    tweetText,
+    tweetTime,
+    tweetDate,
+    client,
+    mediaUrl,
+    views,
+    reposts,
+    likes,
+    bookmarks,
+    repliesList,
+    theme
+  };
+
   const bgStyles = {
     black: 'bg-black text-[#e7e9ea] border-[#2f3336]',
     dim: 'bg-[#15202b] text-[#f7f9f9] border-[#38444d]',
@@ -143,7 +183,6 @@ export default function TwitterGenerator() {
     light: 'border-[#eff3f4]'
   };
 
-  // Render Blue / Gold / Grey Badge
   const renderBadge = (badgeType) => {
     if (badgeType === 'blue') {
       return (
@@ -164,14 +203,21 @@ export default function TwitterGenerator() {
 
   return (
     <div className="flex-1 flex flex-col lg:flex-row h-full overflow-hidden">
-      {/* LEFT PANEL: Controls */}
+      
+      {/* LEFT PANEL */}
       <div className="w-full lg:w-[460px] xl:w-[480px] border-r border-neutral-800 bg-[#13171d] flex flex-col h-full overflow-hidden">
+        
         {/* Top Header */}
-        <div className="p-3.5 border-b border-neutral-800 flex items-center justify-between bg-[#161b22]">
-          <span className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-[#1d9bf0]"></span>
-            X / Twitter Editor
-          </span>
+        <div className="p-3 border-b border-neutral-800 flex items-center justify-between bg-[#161b22]">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setProjectModalOpen(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 rounded-lg text-xs font-semibold transition"
+            >
+              <Folder className="w-3.5 h-3.5 text-[#1d9bf0]" />
+              <span>Cerita Saya</span>
+            </button>
+          </div>
 
           <div className="flex items-center gap-1 bg-neutral-900 p-1 rounded-lg border border-neutral-800">
             <button
@@ -195,6 +241,14 @@ export default function TwitterGenerator() {
           </div>
         </div>
 
+        {/* Quota Banner */}
+        {quotaWarning && (
+          <div className="p-2.5 bg-red-500/10 border-b border-red-500/30 text-red-400 text-xs flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span className="flex-1">{quotaWarning}</span>
+          </div>
+        )}
+
         {/* Tab Selector */}
         <div className="flex border-b border-neutral-800 bg-[#161b22]/50 px-3 pt-2 gap-1">
           <button 
@@ -215,7 +269,7 @@ export default function TwitterGenerator() {
                 : 'text-neutral-400 hover:text-neutral-200'
             }`}
           >
-            Thread Replies ({repliesList.length})
+            Thread ({repliesList.length})
           </button>
           <button 
             onClick={() => setActiveTab('metrics')}
@@ -225,7 +279,7 @@ export default function TwitterGenerator() {
                 : 'text-neutral-400 hover:text-neutral-200'
             }`}
           >
-            Metrics & Stats
+            Metrics
           </button>
         </div>
 
@@ -233,7 +287,6 @@ export default function TwitterGenerator() {
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           {activeTab === 'main' && (
             <div className="space-y-3.5">
-              {/* Profile Config */}
               <div className="p-3 bg-neutral-900/80 rounded-xl border border-neutral-800 space-y-2.5">
                 <h3 className="text-xs font-semibold text-neutral-300 uppercase tracking-wider">Author Profile</h3>
                 
@@ -304,7 +357,6 @@ export default function TwitterGenerator() {
                 </div>
               </div>
 
-              {/* Tweet Body */}
               <div className="p-3 bg-neutral-900/80 rounded-xl border border-neutral-800 space-y-2.5">
                 <h3 className="text-xs font-semibold text-neutral-300 uppercase tracking-wider">Tweet Text</h3>
                 <textarea
@@ -327,7 +379,6 @@ export default function TwitterGenerator() {
                 </div>
               </div>
 
-              {/* Timestamp & Client */}
               <div className="p-3 bg-neutral-900/80 rounded-xl border border-neutral-800 space-y-2.5">
                 <h3 className="text-xs font-semibold text-neutral-300 uppercase tracking-wider">Date & Source</h3>
                 <div className="grid grid-cols-3 gap-2">
@@ -502,7 +553,7 @@ export default function TwitterGenerator() {
             className="flex-1 py-2.5 px-4 bg-[#1d9bf0] hover:bg-[#1a8cd8] disabled:opacity-50 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-[#1d9bf0]/20 transition active:scale-[0.98]"
           >
             <Download className="w-4 h-4" />
-            {isExporting ? 'Generating Image...' : 'Download PNG High-Res'}
+            {isExporting ? 'Exporting...' : 'Download PNG High-Res'}
           </button>
 
           <button
@@ -516,7 +567,7 @@ export default function TwitterGenerator() {
         </div>
       </div>
 
-      {/* RIGHT PANEL: Live Interactive Preview */}
+      {/* RIGHT PANEL */}
       <div className="flex-1 bg-[#090b0e] p-4 lg:p-8 flex items-center justify-center overflow-y-auto">
         <div className="flex flex-col items-center max-w-full">
           <div className="mb-3 text-[11px] font-medium text-neutral-500 flex items-center gap-2">
@@ -524,7 +575,6 @@ export default function TwitterGenerator() {
             <span>Live X (Twitter) Preview</span>
           </div>
 
-          {/* X TWEET CONTAINER */}
           <div 
             ref={tweetPreviewRef}
             className={`w-[480px] max-w-full rounded-2xl border p-4 shadow-2xl transition-all duration-200 ${bgStyles[theme]}`}
@@ -559,7 +609,6 @@ export default function TwitterGenerator() {
               {tweetText}
             </div>
 
-            {/* ATTACHMENT MEDIA (IF ANY) */}
             {mediaUrl && (
               <div className="mb-3 rounded-2xl overflow-hidden border border-neutral-700/50 max-h-80">
                 <img src={mediaUrl} alt="tweet media" className="w-full h-full object-cover" />
@@ -617,7 +666,7 @@ export default function TwitterGenerator() {
               </div>
             </div>
 
-            {/* THREAD REPLIES SECTION */}
+            {/* THREAD REPLIES */}
             {repliesList.length > 0 && (
               <div className="pt-3 space-y-3">
                 {repliesList.map((reply) => (
@@ -647,7 +696,6 @@ export default function TwitterGenerator() {
               </div>
             )}
 
-            {/* Optional Small Watermark */}
             {showWatermark && (
               <div className={`mt-3 pt-2 text-center text-[9px] border-t ${borderStyles[theme]} ${subTextStyles[theme]} tracking-wider`}>
                 AUinAja • auinaja.vercel.app
@@ -656,6 +704,16 @@ export default function TwitterGenerator() {
           </div>
         </div>
       </div>
+
+      {/* CLOUD PROJECT MANAGER MODAL */}
+      <ProjectManagerModal
+        isOpen={projectModalOpen}
+        onClose={() => setProjectModalOpen(false)}
+        currentType="twitter"
+        currentData={currentProjectData}
+        onLoadProject={handleLoadProjectData}
+      />
+
     </div>
   );
 }

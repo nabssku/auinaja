@@ -1,10 +1,13 @@
 import React, { useState, useRef } from 'react';
 import * as htmlToImage from 'html-to-image';
+import { useAuth } from '../context/AuthContext';
+import ProjectManagerModal from './ProjectManagerModal';
 import { 
   Download, Copy, Plus, Trash2, ArrowUp, ArrowDown, Image as ImageIcon, 
   Mic, Check, CheckCheck, Phone, Video, MoreVertical, ChevronLeft, 
   Smile, Paperclip, Camera, Battery, Wifi, Signal, Sparkles,
-  Sun, Moon, Smartphone, Settings, FileText, CheckCircle2
+  Sun, Moon, Smartphone, Settings, FileText, CheckCircle2, Folder, Save,
+  AlertCircle, Zap
 } from 'lucide-react';
 
 const DEFAULT_AVATARS = [
@@ -16,6 +19,8 @@ const DEFAULT_AVATARS = [
 ];
 
 export default function WhatsAppGenerator() {
+  const { user, recordExport, setUpgradeModalOpen } = useAuth();
+  
   const [theme, setTheme] = useState('dark');
   const [device, setDevice] = useState('ios');
   
@@ -27,8 +32,10 @@ export default function WhatsAppGenerator() {
   const [batteryLevel, setBatteryLevel] = useState(78);
   const [showWatermark, setShowWatermark] = useState(true);
 
-  // Script text for bulk parser
+  // Script text for bulk parser & AI
   const [scriptModalOpen, setScriptModalOpen] = useState(false);
+  const [aiTheme, setAiTheme] = useState('romance');
+  const [aiLoading, setAiLoading] = useState(false);
   const [rawScript, setRawScript] = useState(
 `[B]: Kamu udah tidur belum?
 [A]: Belum nih kak, lagi ngerjain revisian skripsi :(
@@ -49,6 +56,8 @@ export default function WhatsAppGenerator() {
   const [activeTab, setActiveTab] = useState('messages');
   const [isExporting, setIsExporting] = useState(false);
   const [copySuccess, setCopySuccess] = useState(false);
+  const [projectModalOpen, setProjectModalOpen] = useState(false);
+  const [quotaWarning, setQuotaWarning] = useState('');
   const chatPreviewRef = useRef(null);
 
   const handleAddMessage = (type = 'sender') => {
@@ -121,8 +130,39 @@ export default function WhatsAppGenerator() {
     }
   };
 
+  // Generate AI Script
+  const handleGenerateAi = async () => {
+    setAiLoading(true);
+    try {
+      const res = await fetch('/api/ai/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ theme: aiTheme })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setRawScript(data.script);
+      }
+    } catch (err) {
+      console.error('AI Error:', err);
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  // Export with Quota Check
   const handleDownloadImage = async () => {
     if (!chatPreviewRef.current) return;
+    setQuotaWarning('');
+
+    // Check SaaS quota
+    const check = await recordExport(contactName, 'whatsapp');
+    if (!check.success) {
+      setQuotaWarning(check.error);
+      setUpgradeModalOpen(true);
+      return;
+    }
+
     setIsExporting(true);
     try {
       const dataUrl = await htmlToImage.toPng(chatPreviewRef.current, {
@@ -161,6 +201,26 @@ export default function WhatsAppGenerator() {
     }
   };
 
+  // Load project from cloud
+  const handleLoadProjectData = (type, data) => {
+    if (data.contactName) setContactName(data.contactName);
+    if (data.contactStatus) setContactStatus(data.contactStatus);
+    if (data.avatarUrl) setAvatarUrl(data.avatarUrl);
+    if (data.messages) setMessages(data.messages);
+    if (data.theme) setTheme(data.theme);
+  };
+
+  const currentProjectData = {
+    contactName,
+    contactStatus,
+    avatarUrl,
+    statusBarTime,
+    batteryLevel,
+    theme,
+    device,
+    messages
+  };
+
   const isDark = theme === 'dark';
   const bgChat = isDark ? '#0b141a' : '#efeae2';
   const bgHeader = isDark ? '#1f2c34' : '#f0f2f5';
@@ -172,25 +232,38 @@ export default function WhatsAppGenerator() {
 
   return (
     <div className="flex-1 flex flex-col lg:flex-row h-full overflow-hidden">
+      
       {/* LEFT PANEL: Controls & Editor */}
       <div className="w-full lg:w-[460px] xl:w-[480px] border-r border-neutral-800 bg-[#13171d] flex flex-col h-full overflow-hidden">
+        
         {/* Top Control Bar */}
-        <div className="p-3.5 border-b border-neutral-800 flex items-center justify-between bg-[#161b22]">
+        <div className="p-3 border-b border-neutral-800 flex items-center justify-between bg-[#161b22]">
           <div className="flex items-center gap-2">
-            <span className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-              WhatsApp Editor
-            </span>
+            <button
+              onClick={() => setProjectModalOpen(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 rounded-lg text-xs font-semibold transition"
+            >
+              <Folder className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Cerita Saya</span>
+            </button>
           </div>
 
           <button 
             onClick={() => setScriptModalOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 rounded-lg text-xs font-medium transition"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 rounded-lg text-xs font-semibold transition"
           >
             <Sparkles className="w-3.5 h-3.5" />
-            <span>AI / Paste Script</span>
+            <span>AI Script / Paste</span>
           </button>
         </div>
+
+        {/* Quota Banner */}
+        {quotaWarning && (
+          <div className="p-2.5 bg-red-500/10 border-b border-red-500/30 text-red-400 text-xs flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span className="flex-1">{quotaWarning}</span>
+          </div>
+        )}
 
         {/* Navigation Tabs */}
         <div className="flex border-b border-neutral-800 bg-[#161b22]/50 px-3 pt-2 gap-1">
@@ -519,10 +592,10 @@ export default function WhatsAppGenerator() {
           <button
             onClick={handleDownloadImage}
             disabled={isExporting}
-            className="flex-1 py-2.5 px-4 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-neutral-950 font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 transition active:scale-[0.98]"
+            className="flex-1 py-2.5 px-4 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-neutral-950 font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 transition active:scale-[0.98]"
           >
             <Download className="w-4 h-4" />
-            {isExporting ? 'Generating Image...' : 'Download PNG High-Res'}
+            {isExporting ? 'Exporting...' : 'Download PNG High-Res'}
           </button>
 
           <button
@@ -541,7 +614,7 @@ export default function WhatsAppGenerator() {
         <div className="flex flex-col items-center max-w-full">
           <div className="mb-3 text-[11px] font-medium text-neutral-500 flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-            <span>Live WhatsApp Preview (Pixel-Perfect)</span>
+            <span>Live WhatsApp Preview</span>
           </div>
 
           <div 
@@ -734,14 +807,14 @@ export default function WhatsAppGenerator() {
         </div>
       </div>
 
-      {/* SCRIPT PARSER MODAL */}
+      {/* SCRIPT & AI ASSISTANT MODAL */}
       {scriptModalOpen && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-xs z-50 flex items-center justify-center p-4">
           <div className="bg-[#161b22] border border-neutral-700 rounded-2xl max-w-lg w-full p-5 space-y-4 shadow-2xl">
             <div className="flex items-center justify-between">
               <h2 className="font-bold text-base text-white flex items-center gap-2">
                 <Sparkles className="w-5 h-5 text-emerald-400" />
-                Paste Dialog Script AU
+                AI Script Writer & Dialog Parser
               </h2>
               <button 
                 onClick={() => setScriptModalOpen(false)}
@@ -751,6 +824,31 @@ export default function WhatsAppGenerator() {
               </button>
             </div>
 
+            {/* AI Generation Preset bar */}
+            <div className="p-3 bg-neutral-900/90 rounded-xl border border-neutral-800 space-y-2">
+              <span className="text-[11px] font-bold text-neutral-300 block">AI Cerita Generator (Auto Idea)</span>
+              <div className="flex gap-2">
+                <select
+                  value={aiTheme}
+                  onChange={(e) => setAiTheme(e.target.value)}
+                  className="flex-1 bg-neutral-950 border border-neutral-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none"
+                >
+                  <option value="romance">Romance: Malam & Perhatian Kecil ❤️</option>
+                  <option value="dosen">Dosen & Mahasiswa Bimbingan 📚</option>
+                  <option value="idol">Idol x Fangirl Rahasia 🎤</option>
+                  <option value="toxic_ex">Toxic Ex: Mau Balikan 💔</option>
+                </select>
+                <button
+                  onClick={handleGenerateAi}
+                  disabled={aiLoading}
+                  className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-bold text-xs rounded-lg flex items-center gap-1 transition"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>{aiLoading ? 'Menulis...' : 'Generate AI'}</span>
+                </button>
+              </div>
+            </div>
+
             <p className="text-xs text-neutral-300">
               Format: 
               <br/><code className="text-emerald-400 font-mono">[A]:</code> untuk chat Kamu (Kanan - Hijau)
@@ -758,7 +856,7 @@ export default function WhatsAppGenerator() {
             </p>
 
             <textarea
-              rows={8}
+              rows={7}
               value={rawScript}
               onChange={(e) => setRawScript(e.target.value)}
               className="w-full bg-neutral-900 border border-neutral-700 rounded-xl p-3 text-xs text-neutral-100 font-mono focus:outline-none focus:border-emerald-500"
@@ -782,6 +880,16 @@ export default function WhatsAppGenerator() {
           </div>
         </div>
       )}
+
+      {/* CLOUD PROJECT MANAGER MODAL */}
+      <ProjectManagerModal
+        isOpen={projectModalOpen}
+        onClose={() => setProjectModalOpen(false)}
+        currentType="whatsapp"
+        currentData={currentProjectData}
+        onLoadProject={handleLoadProjectData}
+      />
+
     </div>
   );
 }
