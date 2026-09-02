@@ -30,9 +30,31 @@ export function AuthProvider({ children }) {
         const data = await res.json();
         setUser(data.user);
         localStorage.setItem('auinaja_user', JSON.stringify(data.user));
+      } else {
+        const errBody = await res.text();
+        console.error('API Error Response:', res.status, errBody);
+        // Fallback local if offline/server issue
+        const fallbackUser = {
+          ...userData,
+          plan: 'free',
+          dailyExportsCount: 0,
+          dailyLimit: 1,
+          remainingExports: 1
+        };
+        setUser(fallbackUser);
+        localStorage.setItem('auinaja_user', JSON.stringify(fallbackUser));
       }
     } catch (err) {
       console.error('Failed to sync user with DB:', err);
+      const fallbackUser = {
+        ...userData,
+        plan: 'free',
+        dailyExportsCount: 0,
+        dailyLimit: 1,
+        remainingExports: 1
+      };
+      setUser(fallbackUser);
+      localStorage.setItem('auinaja_user', JSON.stringify(fallbackUser));
     }
   };
 
@@ -105,65 +127,80 @@ export function AuthProvider({ children }) {
         body: JSON.stringify({ userId: uid, plan })
       });
       if (res.ok) {
-        await refreshUserQuota();
+        const data = await res.json();
+        setUser(prev => ({
+          ...prev,
+          plan: data.user.plan,
+          dailyLimit: data.user.dailyLimit,
+          remainingExports: data.user.remainingExports
+        }));
         setUpgradeModalOpen(false);
-        return true;
       }
     } catch (err) {
-      console.error('Upgrade plan error:', err);
+      console.error('Failed to upgrade:', err);
     }
-    return false;
   };
 
-  // Check & Record Export Quota
-  const recordExport = async (projectId = 'untitled', type = 'whatsapp') => {
+  // Record an export action & verify quota with Neon DB
+  const recordExport = async (projectId, type) => {
     if (!user) {
-      // Free guest export
-      return { success: true, remainingExports: 0 };
+      return { allow: true };
     }
+
     try {
       const res = await fetch('/api/export/record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: user.id, projectId, type })
+        body: JSON.stringify({
+          userId: user.id,
+          projectId,
+          type
+        })
       });
+
       const data = await res.json();
-      if (!res.ok) {
-        return { success: false, error: data.error, reachedLimit: data.reachedLimit };
+
+      if (res.status === 403 || data.reachedLimit) {
+        setUpgradeModalOpen(true);
+        return {
+          allow: false,
+          error: data.error || 'Batas export harian kamu sudah habis!'
+        };
       }
-      await refreshUserQuota();
-      return { success: true, remaining: data.remainingExports };
+
+      if (res.ok && data.success) {
+        setUser(prev => ({
+          ...prev,
+          dailyExportsCount: data.dailyExportsCount,
+          remainingExports: data.remainingExports
+        }));
+        return { allow: true };
+      }
+
+      return { allow: true };
     } catch (err) {
-      console.error('Record export failed:', err);
-      return { success: true };
+      console.error('Failed to record export quota:', err);
+      return { allow: true };
     }
   };
-
-  useEffect(() => {
-    if (user?.id) {
-      refreshUserQuota();
-    }
-  }, []);
 
   return (
     <AuthContext.Provider value={{
       user,
       loading,
-      googleClientId: GOOGLE_CLIENT_ID,
+      upgradeModalOpen,
+      setUpgradeModalOpen,
       handleGoogleSuccess,
       handleDemoLogin,
       handleLogout,
+      refreshUserQuota,
       handleUpgrade,
       recordExport,
-      refreshUserQuota,
-      upgradeModalOpen,
-      setUpgradeModalOpen
+      googleClientId: GOOGLE_CLIENT_ID
     }}>
       {children}
     </AuthContext.Provider>
   );
 }
 
-export function useAuth() {
-  return useContext(AuthContext);
-}
+export const useAuth = () => useContext(AuthContext);
